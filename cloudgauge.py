@@ -1569,6 +1569,184 @@ def check_resilience_assets(org_id, job_id):
         error_result = {"Check": "Resilience Asset Checks", "Finding": [{"Error": str(e)}], "Status": "Error"}
         _write_finding_to_gcs(job_id, "Resilience_Asset_Checks_Error", error_result)
 
+def check_cloud_sql_security(scope_id, all_projects, job_id):
+    """
+    Checks Cloud SQL instances for Public IPs and SSL enforcement.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "Cloud SQL Security"
+    print(f"🛡️  [{job_id}] Checking {CHECK_NAME}...")
+    
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            # Use Asset API for efficiency if possible, or SQL Admin API
+            # Using SQL Admin API for direct configuration check
+            service = google_api_build('sqladmin', 'v1beta4', credentials=credentials)
+            instances = service.instances().list(project=project_id).execute().get('items', [])
+            
+            for instance in instances:
+                name = instance.get('name')
+                settings = instance.get('settings', {})
+                ip_config = settings.get('ipConfiguration', {})
+                
+                # Check 1: Public IP
+                if ip_config.get('ipv4Enabled', False):
+                     findings.append({"Project": project_id, "Instance": name, "Issue": "Public IP enabled."})
+                
+                # Check 2: SSL Enforcement
+                if not ip_config.get('requireSsl', False):
+                    findings.append({"Project": project_id, "Instance": name, "Issue": "SSL not enforced."})
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All Cloud SQL instances have Public IP disabled and SSL enforced."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_vpc_configuration(scope_id, all_projects, job_id):
+    """
+    Checks for 'default' VPC usage and subnets without Private Google Access.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "VPC Configuration"
+    print(f"🕸️  [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            compute = google_api_build('compute', 'v1', credentials=credentials)
+            
+            # Check 1: Default VPC
+            networks = compute.networks().list(project=project_id).execute().get('items', [])
+            for net in networks:
+                if net.get('name') == 'default':
+                    findings.append({"Project": project_id, "Network": "default", "Issue": "Default VPC network exists."})
+
+            # Check 2: Private Google Access
+            regions = compute.regions().list(project=project_id).execute().get('items', [])
+            for region in regions:
+                subnets = compute.subnetworks().list(project=project_id, region=region['name']).execute().get('items', [])
+                for subnet in subnets:
+                    if not subnet.get('privateIpGoogleAccess', False):
+                        findings.append({"Project": project_id, "Subnet": subnet['name'], "Issue": "Private Google Access disabled."})
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No default VPCs found and all subnets have Private Google Access."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_storage_ubla(scope_id, all_projects, job_id):
+    """
+    Checks if Uniform Bucket-Level Access (UBLA) is enabled on GCS buckets.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "GCS Uniform Bucket-Level Access"
+    print(f"🪣 [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            storage_client = storage.Client(project=project_id)
+            for bucket in storage_client.list_buckets():
+                if not bucket.iam_configuration.uniform_bucket_level_access_enabled:
+                    findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled."})
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All buckets have Uniform Bucket-Level Access enabled."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_vm_external_ips(scope_id, all_projects, job_id):
+    """
+    Checks for VM instances with external IP addresses.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "VM External IPs"
+    print(f"🖥️  [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            compute = google_api_build('compute', 'v1', credentials=credentials)
+            
+            req = compute.instances().aggregatedList(project=project_id)
+            while req:
+                resp = req.execute()
+                for scope, result in resp.get('items', {}).items():
+                    if 'instances' in result:
+                        for instance in result['instances']:
+                            for interface in instance.get('networkInterfaces', []):
+                                if 'accessConfigs' in interface: # accessConfigs implies external IP
+                                    findings.append({"Project": project_id, "VM": instance['name'], "Issue": "Has external IP address."})
+                req = compute.instances().aggregatedList_next(previous_request=req, previous_response=resp)
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No VMs with external IP addresses found."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
 # --- Cost Optimization Checks ---
 
 def run_cost_recommendations(scope_id, all_projects, active_zones, active_regions, job_id):
@@ -1981,6 +2159,10 @@ def run_all_checks(scope, scope_id, job_id, progress_callback=None):
         ("Operational Excellence & Observability", "Network Insights", run_network_insights, (scope_id, all_projects, active_zones, active_regions, job_id)),
         ("Operational Excellence & Observability", "Miscellaneous Checks", run_miscellaneous_checks_refactored, (scope, scope_id, all_projects, job_id)),
         ("Operational Excellence & Observability", "Service Quota Limits", run_service_limit_checks_refactored, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "Cloud SQL Security", check_cloud_sql_security, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "VPC Configuration", check_vpc_configuration, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "GCS Uniform Bucket-Level Access", check_storage_ubla, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':
